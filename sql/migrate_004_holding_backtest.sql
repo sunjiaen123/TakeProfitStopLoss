@@ -1,0 +1,75 @@
+CREATE TABLE IF NOT EXISTS tpsl_holding_backtest_runs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    run_id VARCHAR(64) NOT NULL COMMENT '持仓回测运行编号',
+    start_date DATE NOT NULL COMMENT '最早建仓日期',
+    end_date DATE NOT NULL COMMENT '回测截止日期',
+    stop_order_type VARCHAR(24) NOT NULL COMMENT '止损订单类型',
+    position_count INT NOT NULL COMMENT '回测持仓数量',
+    status VARCHAR(24) NOT NULL COMMENT '运行状态',
+    config_json JSON NULL COMMENT '回测配置',
+    metrics_json JSON NULL COMMENT '汇总指标',
+    error_message VARCHAR(2000) NULL COMMENT '失败错误信息',
+    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '开始时间',
+    finished_at DATETIME NULL COMMENT '结束时间',
+    PRIMARY KEY (id),
+    KEY idx_holding_runs_run_id (run_id),
+    KEY idx_holding_runs_dates (start_date, end_date),
+    KEY idx_holding_runs_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+COMMENT='真实持仓多日回测运行记录表';
+
+CREATE TABLE IF NOT EXISTS tpsl_holding_backtest_positions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    run_id VARCHAR(64) NOT NULL COMMENT '持仓回测运行编号',
+    symbol VARCHAR(24) NOT NULL COMMENT '股票统一代码',
+    entry_date DATE NOT NULL COMMENT '建仓日期',
+    avg_cost DECIMAL(20, 6) NOT NULL COMMENT '建仓平均成本',
+    quantity DECIMAL(20, 4) NOT NULL COMMENT '持仓数量',
+    exit_date DATE NULL COMMENT '模拟退出日期',
+    exit_price DECIMAL(20, 6) NULL COMMENT '模拟退出价格',
+    exit_outcome VARCHAR(40) NOT NULL COMMENT '退出或持有结果',
+    final_stop_price DECIMAL(20, 6) NULL COMMENT '最终有效止损触发价',
+    strategy_return DECIMAL(14, 8) NOT NULL COMMENT '动态止损策略收益率',
+    hold_return DECIMAL(14, 8) NOT NULL COMMENT '不止损持有收益率',
+    excess_return DECIMAL(14, 8) NOT NULL COMMENT '动态止损相对持有超额收益',
+    strategy_max_drawdown DECIMAL(14, 8) NOT NULL COMMENT '动态止损最大回撤',
+    hold_max_drawdown DECIMAL(14, 8) NOT NULL COMMENT '不止损持有最大回撤',
+    strategy_max_loss_from_cost DECIMAL(14, 8) NOT NULL COMMENT '动态止损相对成本最大亏损',
+    hold_max_loss_from_cost DECIMAL(14, 8) NOT NULL COMMENT '持有相对成本最大亏损',
+    stop_update_count INT NOT NULL COMMENT '止损上调次数',
+    stop_limit_unfilled_count INT NOT NULL COMMENT '止损限价未成交次数',
+    trading_days INT NOT NULL COMMENT '参与回测交易日数量',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    KEY idx_holding_positions_run_symbol (run_id, symbol),
+    KEY idx_holding_positions_entry_date (entry_date),
+    KEY idx_holding_positions_outcome (exit_outcome)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+COMMENT='真实持仓多日回测汇总表';
+
+CREATE TABLE IF NOT EXISTS tpsl_holding_backtest_daily (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+    run_id VARCHAR(64) NOT NULL COMMENT '持仓回测运行编号',
+    symbol VARCHAR(24) NOT NULL COMMENT '股票统一代码',
+    signal_date DATE NOT NULL COMMENT '生成止损建议的交易日期',
+    execution_date DATE NULL COMMENT '止损建议对应的下一交易日',
+    close_price DECIMAL(20, 6) NOT NULL COMMENT '信号日收盘价',
+    proposed_stop_price DECIMAL(20, 6) NOT NULL COMMENT '当日模型建议止损触发价',
+    active_stop_price DECIMAL(20, 6) NOT NULL COMMENT '只升不降后的有效止损触发价',
+    stop_limit_price DECIMAL(20, 6) NOT NULL COMMENT '有效止损限价',
+    next_open DECIMAL(20, 6) NULL COMMENT '下一交易日开盘价',
+    next_high DECIMAL(20, 6) NULL COMMENT '下一交易日最高价',
+    next_low DECIMAL(20, 6) NULL COMMENT '下一交易日最低价',
+    next_close DECIMAL(20, 6) NULL COMMENT '下一交易日收盘价',
+    event VARCHAR(40) NOT NULL COMMENT '当日回测事件',
+    strategy_equity DECIMAL(20, 8) NOT NULL COMMENT '动态止损策略净值',
+    hold_equity DECIMAL(20, 8) NOT NULL COMMENT '不止损持有净值',
+    confidence DECIMAL(10, 6) NOT NULL COMMENT '模型内部置信度',
+    model_version VARCHAR(64) NOT NULL COMMENT '月度模型版本',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (id),
+    KEY idx_holding_daily_run_symbol (run_id, symbol),
+    KEY idx_holding_daily_signal_date (signal_date),
+    KEY idx_holding_daily_event (event)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+COMMENT='真实持仓多日回测每日路径表';

@@ -1,0 +1,235 @@
+[database]
+# 推荐直接填写以下字段，程序会自动处理密码中的特殊字符。
+url = ""
+url_env = "MYSQL_URL"
+driver = "mysql+pymysql"
+host = "127.0.0.1"
+port = 3306
+username = "root"
+password = "password"
+name = "take_profit_stop_loss"
+pool_size = 10
+max_overflow = 5
+
+[database.tables]
+positions = "stock_positions"
+bars = "stock_daily_bars"
+recommendations = "tpsl_recommendations"
+
+[database.position_columns]
+symbol = "symbol"
+quantity = "quantity"
+avg_cost = "avg_cost"
+# 以下三个字段可以设置为 ""，程序会使用默认值。
+entry_date = "entry_date"
+max_loss_pct = "max_loss_pct"
+current_stop = "current_stop"
+status = "status"
+
+[database.bar_columns]
+symbol = "symbol"
+trade_date = "trade_date"
+open = "open"
+high = "high"
+low = "low"
+close = "close"
+volume = "volume"
+# amount 可以设置为 ""，程序将使用 close * volume 代替。
+amount = "amount"
+# industry 可以设置为 ""，程序将统一归入 UNKNOWN。
+industry = "industry_code"
+# 复权因子可以为空；为空时按 1.0 处理。
+adj_factor = "adj_factor"
+is_suspended = "is_suspended"
+
+[positions]
+active_status = "HOLDING"
+default_max_loss_pct = 0.05
+
+[performance]
+workers = 10
+
+[data_sync]
+source = "auto"
+start_date = "2021-01-01"
+batch_size = 2000
+retry_count = 6
+retry_delay_seconds = 3.0
+socket_timeout_seconds = 30.0
+
+[training]
+lookback_days = 1200
+validation_days = 120
+min_symbol_rows = 80
+max_training_symbols = 1500
+similarity_sample_limit = 200000
+random_seed = 42
+high_quantiles = [0.30, 0.50, 0.70]
+low_quantiles = [0.10, 0.20, 0.50]
+n_estimators = 700
+max_depth = 7
+learning_rate = 0.04
+subsample = 0.85
+colsample_bytree = 0.85
+use_gpu = true
+
+[recommendation]
+take_profit_quantile = 0.70
+stop_loss_quantile = 0.20
+similarity_top_k = 100
+atr_stop_multiplier = 1.5
+stop_limit_slippage_pct = 0.003
+minimum_stop_gap_pct = 0.050
+minimum_take_profit_pct = 0.008
+minimum_profit_over_cost_pct = 0.003
+maximum_take_profit_pct = 0.15
+minimum_risk_reward = 1.2
+minimum_take_profit_confidence = 0.70
+price_tick = 0.01
+# 不同板块/ST 的涨跌停比例不同，0 表示不统一限制。
+default_daily_price_limit_pct = 0.0
+
+[backtest]
+max_symbols = 100
+similarity_query_sample_limit = 20000
+similarity_batch_size = 128
+stop_order_type = "limit"
+fixed_take_profit_pct = 0.03
+fixed_stop_loss_pct = 0.02
+atr_take_profit_multiplier = 2.0
+atr_stop_loss_multiplier = 1.5
+
+[stop_tuning]
+max_symbols = 100
+holding_days = [20, 40, 60]
+atr_multipliers = [1.0, 1.5, 2.0, 2.5, 3.0]
+limit_slippage_pcts = [0.003, 0.006, 0.010]
+minimum_stop_gap_pcts = [0.005, 0.010, 0.015, 0.020, 0.030, 0.050, 0.070, 0.100]
+include_market_orders = true
+entry_frequency = "monthly"
+
+[risk_fit]
+enabled = false
+max_symbols = 300
+holding_days = [20, 40, 60]
+candidate_stop_gap_pcts = [0.005, 0.010, 0.015, 0.020, 0.030, 0.050, 0.070, 0.100]
+atr_multiplier = 1.5
+limit_slippage_pct = 0.003
+min_stop_gap_pct = 0.005
+max_stop_gap_pct = 0.100
+validation_months = 2
+n_estimators = 300
+max_depth = 4
+learning_rate = 0.05
+entry_frequency = "monthly"
+
+[volatility_stop]
+enabled = false
+max_symbols = 300
+holding_days = [20, 40, 60]
+lookback_days = 120
+k = 1.5
+k_values = [0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25, 2.50, 2.75, 3.00]
+shrink_n0 = 120.0
+gap_min = 0.005
+gap_max = 0.100
+pool = "industry"
+adjustment_factor = 1.0
+adjustment_min = 0.8
+adjustment_max = 1.2
+validation_months = 3
+walk_forward_train_months = 12
+walk_forward_step_months = 3
+bootstrap_samples = 200
+shape_target_gap_pct = 0.0
+return_tolerance_pct = 0.010
+max_loss_tie_tolerance_pct = 0.002
+fixed_baseline_gap_pcts = [0.005, 0.010, 0.015, 0.020, 0.030, 0.050, 0.070, 0.100]
+stop_order_type = "limit"
+limit_slippage_pct = 0.003
+entry_frequency = "monthly"
+
+[exit_machine]
+enabled = false
+max_symbols = 300
+holding_days = [20, 40, 60]
+n_init = 8
+progress_r = 1.0
+atr_initial_mult = 1.5
+entry_structure_buffer = 0.3
+chandelier_mult = 3.0
+swing_trend_buffer = 0.3
+breakdown_ma = 20
+breakdown_buffer = 0.2
+ma_fast = 10
+profit_tier_1_gain = 0.08
+profit_tier_1_floor_pct = 0.005
+profit_tier_2_gain = 0.15
+profit_tier_2_capture = 0.50
+profit_tier_3_gain = 0.30
+profit_tier_3_capture = 0.60
+swing_pivot_k = 2
+r_floor_atr_mult = 0.5
+lookahead_extend_days = 20
+fixed_baseline_gap = 0.02
+hard_constraint_tolerance_pct = 0.005
+sell_fly_days = [5, 10, 20]
+sell_fly_thresholds = [0.05, 0.10]
+primary_sell_fly_days = 10
+primary_sell_fly_threshold = 0.05
+winner_peak_gain = 0.15
+trend_capture_ratio = 0.5
+walk_forward_train_months = 12
+validation_months = 3
+walk_forward_step_months = 3
+bootstrap_samples = 200
+stop_order_type = "limit"
+limit_slippage_pct = 0.003
+entry_frequency = "monthly"
+
+[chart_exit]
+# 研究回测专用；不会改变 recommend 的生产止损。
+enabled = false
+max_symbols = 300
+holding_days = [20, 40, 60]
+lookahead_extend_days = 20
+initial_days = 8
+progress_r = 1.0
+initial_min_gap_pct = 0.025
+entry_structure_buffer = 0.3
+r_floor_atr_mult = 0.5
+ma_fast = 10
+ma_trend = 20
+ma_long = 60
+ma_slope_lookback = 5
+breakdown_confirm_closes = 2
+swing_pivot_k = 2
+profit_tier_1_gain = 0.08
+profit_tier_1_floor_pct = 0.005
+profit_tier_2_gain = 0.15
+profit_tier_2_capture = 0.30
+profit_tier_3_gain = 0.30
+profit_tier_3_capture = 0.45
+reentry_cooldown_days = 2
+reentry_breakout_lookback = 10
+# 仅为防止异常频繁交易的工程保险，不代表必须重新上车几次。
+max_entries_safety = 3
+max_reentry_risk_pct = 0.05
+commission_rate = 0.0003
+stamp_tax_rate = 0.0005
+market_slippage_pct = 0.001
+stop_order_type = "limit"
+limit_slippage_pct = 0.003
+hard_constraint_tolerance_pct = 0.005
+winner_peak_gain = 0.15
+trend_capture_ratio = 0.5
+sell_fly_days = [5, 10, 20]
+sell_fly_thresholds = [0.05, 0.10]
+walk_forward_train_months = 12
+validation_months = 3
+walk_forward_step_months = 3
+bootstrap_samples = 200
+entry_frequency = "monthly"
+
+[artifacts]
+directory = "artifacts"

@@ -1,0 +1,178 @@
+Metadata-Version: 2.4
+Name: take-profit-stop-loss
+Version: 0.1.0
+Summary: A股持仓次日止盈止损建议系统
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: pandas<3,>=2.1
+Requires-Dist: SQLAlchemy<3,>=2.0
+Requires-Dist: PyMySQL<2,>=1.1
+Requires-Dist: xgboost<4,>=2.1
+Requires-Dist: baostock<1,>=0.9.2
+
+# TakeProfitStopLoss
+
+这是一个面向 A 股持仓的次日条件单建议 MVP。系统在每个交易日收盘后：
+
+1. 从 MySQL 读取有效持仓和历史日线；
+2. 使用可配置线程池计算个股、行业和市场特征；
+3. 使用 XGBoost 分位数模型预测次日最高/最低收益分布；
+4. 检索历史相似形态，校验模型预测；
+5. 结合持仓成本、最大亏损、ATR 和已有止损价生成建议；
+6. 把结果写回 MySQL，并可同时导出 CSV 预览。
+
+## 模型设计
+
+第一版训练 6 个 XGBoost 分位数模型：
+
+- 次日最高收益：30%、50%、70% 分位；
+- 次日最低收益：10%、20%、50% 分位。
+
+模型采用全市场联合训练，输入由个股走势、成交量、行业横截面和全市场状态组成。GPU 配置开启时优先使用 CUDA；CUDA 训练失败会自动回退到 CPU，并在模型元数据中记录实际设备。
+
+为控制本地内存和 8 GB 显存，默认从全市场数据池中固定抽取 1,500 支股票训练，并强制包含当前持仓股票。可通过 `training.max_training_symbols` 调整；随机种子固定，重复训练使用相同样本。
+
+训练并非每天执行。建议先每月训练一次；每日只执行 `recommend`。后续应根据滚动回测决定实际训练频率。
+
+## 数据要求
+
+参考建表脚本见 `sql/schema.sql`。如果已有业务表，可在 `config.toml` 中映射表名和字段名。`entry_date`、`max_loss_pct`、`current_stop`、`amount`、`industry` 是可选字段，可在映射中设置为空字符串。
+
+日线价格必须采用一致口径。建议模型使用前复权行情，同时保留原始收盘价供实际条件单换算；当前 MVP 假定数据库中的 OHLC 已经是可以直接用于下单的同一价格口径。如果你的表同时保存复权价和原始价，下一版需要明确拆分。
+
+行业字段允许为空，空值会归入 `UNKNOWN`，但这会降低板块特征质量。
+
+## 安装
+
+建议使用 Python 3.11 或 3.12：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e .
+Copy-Item config.example.toml config.toml
+```
+
+在 `config.toml` 中填写 MySQL 密码：
+
+```toml
+[database]
+host = "127.0.0.1"
+port = 3306
+username = "root"
+password = "你的密码"
+```
+
+密码中的特殊字符会由程序自动处理。
+
+首次建库建表：
+
+```powershell
+.\.venv\Scripts\tpsl.exe --config config.toml init-db
+```
+
+该命令会创建 `take_profit_stop_loss` 数据库和以下表：
+
+- `stock_master`：股票、板块和涨跌停规则；
+- `stock_positions`：当前持仓；
+- `stock_daily_bars`：原始可交易价格、成交量和复权因子；
+- `tpsl_recommendations`：每日建议；
+- `tpsl_model_runs`：训练运行记录。
+
+`config.toml` 已被加入 `.gitignore`，不会被默认提交到 Git。
+
+初始化后，可以先手工写入一条持仓验证：
+
+```sql
+DELETE FROM take_profit_stop_loss.stock_positions
+WHERE symbol = '600519.SH';
+
+INSERT INTO take_profit_stop_loss.stock_positions
+    (symbol, quantity, available_quantity, avg_cost, entry_date, max_loss_pct)
+VALUES
+    ('600519.SH', 100, 100, 1500.00, '2026-06-19', 0.05);
+```
+
+## 配置
+
+默认线程数为 10：
+
+```toml
+[performance]
+workers = 10
+```
+
+本地 GPU：
+
+```toml
+[training]
+use_gpu = true
+```
+
+当前机器检测到 NVIDIA GeForce RTX 5060 Ti 8GB。程序只启动一个 GPU 训练流程，`workers` 用于特征计算和 CPU 训练线程，不会并行启动 10 个 GPU 模型。
+
+## 运行
+
+首次同步持仓股票行情，验证数据源和代码：
+
+```powershell
+.\.venv\Scripts\tpsl.exe --config config.toml sync-data `
+  --scope positions `
+  --start-date 2021-01-01 `
+  --end-date 2026-06-19
+```
+
+首次正式训练前同步全部 A 股：
+
+```powershell
+.\.venv\Scripts\tpsl.exe --config config.toml sync-data `
+  --scope all `
+  --start-date 2021-01-01 `
+  --end-date 2026-06-19
+```
+
+BaoStock 使用进程级 socket，会通过 `performance.workers` 个隔离 worker 并发下载，默认 10。重复运行会先删除相同股票、相同日期区间的数据，再重新写入，因此不会产生重复日线。
+已完整同步到目标截止日期的股票会自动跳过；网络失败时可直接重复执行同一命令续传。BaoStock 并发登录采用错峰和退避重试，停牌日的空成交量会以数据库 `NULL` 保存。
+socket 默认 30 秒超时，避免少数异常连接让整个同步任务永久等待。
+
+首次或定期训练：
+
+```powershell
+tpsl --config config.toml train --end-date 2026-06-19
+```
+
+交易日晚间生成建议，先用 dry-run 检查：
+
+```powershell
+tpsl --config config.toml recommend `
+  --as-of-date 2026-06-19 `
+  --dry-run `
+  --output output\recommendations-2026-06-19.csv
+```
+
+确认结果后写回 MySQL：
+
+```powershell
+tpsl --config config.toml recommend --as-of-date 2026-06-19
+```
+
+`as-of-date` 必须是已经完成日线入库的交易日，而不是自然日“今天”。
+
+## 输出解释
+
+- `take_profit_price`：建议止盈委托价；
+- `stop_trigger_price`：止损条件触发价；
+- `stop_limit_price`：触发后使用的限价，低于触发价以留出成交空间；
+- `risk_reward_ratio`：基于当日收盘价的预期盈亏比；
+- `confidence`：模型、相似样本数量和相似距离组成的内部评分，不是收益概率；
+- `reason`：预测分布、相似形态和风控约束摘要。
+
+## 当前边界
+
+- 日线无法判断同一天内止盈和止损哪个先触发，严谨回测需要分钟线；
+- 暂未处理 ST、科创板、创业板、北交所各自的涨跌停规则；
+- 暂未处理除权除息导致的持仓成本和条件单价格调整；
+- 没有真实数据库结构和样本，因此当前版本只完成数据契约、训练和推理主流程，尚未进行真实收益回测；
+- 建议价格是模型研究输出，不保证成交，也不构成投资建议。
