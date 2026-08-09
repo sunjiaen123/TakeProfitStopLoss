@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -32,6 +33,20 @@ STRATEGIES = (
     CHART_STRATEGY,
     CHART_REENTRY_STRATEGY,
 )
+
+
+@dataclass(frozen=True)
+class ChartExitRecommendation:
+    action: str
+    reason: str
+    stop_trigger_price: float
+    stop_limit_price: float
+    profile: str
+    position_scale: float
+    held_peak_close: float | None = None
+    trend_active: bool | None = None
+    trade_days: int | None = None
+    diagnostic: str = ""
 NO_EXIT_OUTCOMES = {
     "NO_TRIGGER_CLOSE",
     "SUSPENDED_NO_TRIGGER",
@@ -68,6 +83,48 @@ def _confirmed_swing_highs(highs: pd.Series, *, pivot_k: int) -> pd.Series:
     return pd.Series(recent, index=highs.index)
 
 
+def _price_series(frame: pd.DataFrame, raw_column: str, adjusted_column: str) -> pd.Series:
+    source = raw_column if raw_column in frame.columns else adjusted_column
+    return pd.to_numeric(frame[source], errors="coerce")
+
+
+def add_chart_exit_indicators(features: pd.DataFrame, config: AppConfig) -> pd.DataFrame:
+    if features.empty:
+        return features.copy()
+
+    settings = config.chart_exit
+    parts: list[pd.DataFrame] = []
+    for _, group in features.groupby("symbol", sort=False):
+        group = group.sort_values("trade_date").copy()
+        close = _price_series(group, "raw_close", "close")
+        high = _price_series(group, "raw_high", "high")
+        low = _price_series(group, "raw_low", "low")
+        group["ma_fast"] = close.rolling(int(settings.ma_fast), min_periods=1).mean()
+        group["ma_trend"] = close.rolling(int(settings.ma_trend), min_periods=1).mean()
+        group["ma_long"] = close.rolling(int(settings.ma_long), min_periods=1).mean()
+        group["ma_trend_slope"] = (
+            group["ma_trend"]
+            / group["ma_trend"].shift(int(settings.ma_slope_lookback))
+            - 1.0
+        )
+        group["recent_swing_low"] = _recent_confirmed_swing_lows(
+            low,
+            pivot_k=int(settings.swing_pivot_k),
+        ).fillna(low.rolling(10, min_periods=1).min())
+        group["recent_swing_high"] = _confirmed_swing_highs(
+            high,
+            pivot_k=int(settings.swing_pivot_k),
+        ).fillna(high.rolling(10, min_periods=1).max())
+        group["prior_breakout_high"] = high.shift(1).rolling(
+            int(settings.reentry_breakout_lookback),
+            min_periods=int(settings.reentry_breakout_lookback),
+        ).max()
+        parts.append(group)
+    return pd.concat(parts, ignore_index=True).sort_values(
+        ["symbol", "trade_date"]
+    ).reset_index(drop=True)
+
+
 def _prepare_chart_features(
     engine: Any,
     config: AppConfig,
@@ -95,32 +152,10 @@ def _prepare_chart_features(
     if features.empty:
         raise RuntimeError("K线持仓回测特征为空")
 
+    features = add_chart_exit_indicators(features, config)
     parts: list[pd.DataFrame] = []
     for _, group in features.groupby("symbol", sort=False):
         group = group.sort_values("trade_date").copy()
-        close = pd.to_numeric(group["raw_close"], errors="coerce")
-        high = pd.to_numeric(group["raw_high"], errors="coerce")
-        low = pd.to_numeric(group["raw_low"], errors="coerce")
-        group["ma_fast"] = close.rolling(int(settings.ma_fast), min_periods=1).mean()
-        group["ma_trend"] = close.rolling(int(settings.ma_trend), min_periods=1).mean()
-        group["ma_long"] = close.rolling(int(settings.ma_long), min_periods=1).mean()
-        group["ma_trend_slope"] = (
-            group["ma_trend"]
-            / group["ma_trend"].shift(int(settings.ma_slope_lookback))
-            - 1.0
-        )
-        group["recent_swing_low"] = _recent_confirmed_swing_lows(
-            low,
-            pivot_k=int(settings.swing_pivot_k),
-        ).fillna(low.rolling(10, min_periods=1).min())
-        group["recent_swing_high"] = _confirmed_swing_highs(
-            high,
-            pivot_k=int(settings.swing_pivot_k),
-        ).fillna(high.rolling(10, min_periods=1).max())
-        group["prior_breakout_high"] = high.shift(1).rolling(
-            int(settings.reentry_breakout_lookback),
-            min_periods=int(settings.reentry_breakout_lookback),
-        ).max()
         for source, target in (
             ("raw_open", "next_open"),
             ("raw_high", "next_high"),
@@ -710,6 +745,207 @@ def _new_trade_chart_state(state: dict[str, Any], row: pd.Series, config: AppCon
         "below_ma_count": 0,
         "below_fast_count": 0,
     }
+
+
+def _finite_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if np.isfinite(result) else default
+
+
+def _row_price(row: pd.Series, raw_column: str, adjusted_column: str) -> float | None:
+    if raw_column in row and pd.notna(row.get(raw_column)):
+        return _finite_float(row.get(raw_column))
+    return _finite_float(row.get(adjusted_column))
+
+
+def _with_position_max_loss(config: AppConfig, max_loss: float) -> AppConfig:
+    positions = replace(config.positions, default_max_loss_pct=float(max_loss))
+    if is_dataclass(config):
+        return replace(config, positions=positions)
+    return SimpleNamespace(
+        chart_exit=config.chart_exit,
+        positions=positions,
+        recommendation=config.recommendation,
+    )
+
+
+def recommend_chart_exit(
+    history: pd.DataFrame,
+    position: pd.Series | dict[str, Any],
+    as_of_date: date,
+    config: AppConfig,
+) -> ChartExitRecommendation:
+    settings = config.chart_exit
+    profile = str(settings.production_profile)
+    position_scale = float(settings.position_scale)
+    tick = float(config.recommendation.price_tick)
+    avg_cost = _finite_float(position.get("avg_cost"))
+    max_loss = _finite_float(position.get("max_loss_pct"))
+    if max_loss is None or not 0 < max_loss < 1:
+        max_loss = float(config.positions.default_max_loss_pct)
+
+    current_close: float | None = None
+
+    def unavailable(reason: str, diagnostic: str) -> ChartExitRecommendation:
+        trigger = np.nan
+        limit = np.nan
+        if avg_cost is not None:
+            raw_trigger = avg_cost * (1.0 - max_loss)
+            if current_close is not None:
+                raw_trigger = min(raw_trigger, current_close)
+            trigger = round_to_tick(raw_trigger, tick, "down")
+            limit = round_to_tick(
+                trigger * (1.0 - float(settings.limit_slippage_pct)),
+                tick,
+                "down",
+            )
+        return ChartExitRecommendation(
+            action="HOLD",
+            reason=reason,
+            stop_trigger_price=float(trigger),
+            stop_limit_price=float(limit),
+            profile=profile,
+            position_scale=position_scale,
+            diagnostic=diagnostic,
+        )
+
+    if avg_cost is None or avg_cost <= 0:
+        return unavailable("chart_exit_unavailable", "avg_cost_missing")
+    if history.empty:
+        return unavailable("chart_exit_unavailable", "history_empty")
+
+    frame = history.copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame = frame.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+    as_of_timestamp = pd.Timestamp(as_of_date).normalize()
+    frame = frame.loc[frame["trade_date"].dt.normalize() <= as_of_timestamp].reset_index(drop=True)
+    if frame.empty:
+        return unavailable("chart_exit_unavailable", "history_before_as_of_empty")
+
+    current_matches = frame.index[
+        frame["trade_date"].dt.normalize() == as_of_timestamp
+    ].tolist()
+    if not current_matches:
+        return unavailable("chart_exit_unavailable", "as_of_bar_missing")
+    current_index = int(current_matches[-1])
+    current_row = frame.iloc[current_index]
+    current_close = _row_price(current_row, "raw_close", "close")
+    if current_close is None:
+        return unavailable("chart_exit_unavailable", "current_close_missing")
+
+    diagnostics: list[str] = []
+    entry_value = position.get("entry_date")
+    entry_timestamp = pd.to_datetime(entry_value, errors="coerce")
+    if pd.isna(entry_timestamp):
+        entry_index = 0
+        diagnostics.append("entry_date_missing")
+    else:
+        entry_timestamp = pd.Timestamp(entry_timestamp).normalize()
+        if entry_timestamp > as_of_timestamp:
+            return unavailable("chart_exit_unavailable", "entry_date_after_as_of")
+        first_available = pd.Timestamp(frame.iloc[0]["trade_date"]).normalize()
+        if entry_timestamp < first_available:
+            diagnostics.append("entry_history_truncated")
+        entry_matches = frame.index[
+            (frame["trade_date"].dt.normalize() >= entry_timestamp)
+            & (frame.index <= current_index)
+        ].tolist()
+        entry_index = int(entry_matches[0]) if entry_matches else 0
+
+    entry_row = frame.iloc[entry_index]
+    for column in ("recent_swing_low", "atr_14_pct"):
+        if _finite_float(entry_row.get(column)) is None:
+            return unavailable("chart_exit_unavailable", f"entry_{column}_missing")
+
+    local_config = _with_position_max_loss(config, max_loss)
+    chart = _new_trade_chart_state({"cost": avg_cost}, entry_row, local_config)
+    current_reason: str | None = None
+    current_trade_days = 0
+    window = frame.iloc[entry_index : current_index + 1].reset_index(drop=True)
+    for offset, row in window.iterrows():
+        close = _row_price(row, "raw_close", "close")
+        ma_fast = _finite_float(row.get("ma_fast"))
+        ma_trend = _finite_float(row.get("ma_trend"))
+        ma_long = _finite_float(row.get("ma_long"))
+        ma_slope = _finite_float(row.get("ma_trend_slope"))
+        recent_swing_low = _finite_float(row.get("recent_swing_low"))
+        if None in (close, ma_fast, ma_trend, ma_long, ma_slope, recent_swing_low):
+            if int(offset) == len(window) - 1:
+                return unavailable("chart_exit_unavailable", "current_indicator_missing")
+            diagnostics.append("indicator_gap")
+            continue
+
+        current_trade_days = int(offset) + 1
+        chart["held_peak_close"] = max(float(chart["held_peak_close"]), float(close))
+        if (
+            not chart["trend"]
+            and float(close) >= float(chart["progress_price"])
+            and float(close) > float(ma_trend)
+            and float(ma_slope) > 0
+        ):
+            chart["trend"] = True
+
+        floor = _profit_floor(avg_cost, float(chart["held_peak_close"]), local_config)
+        next_open_reason: str | None = None
+        if np.isfinite(floor) and float(close) < floor:
+            next_open_reason = "profit_floor_confirmed"
+        if chart["trend"]:
+            if float(close) < float(ma_trend):
+                chart["below_ma_count"] += 1
+            else:
+                chart["below_ma_count"] = 0
+            if next_open_reason is None and float(close) < float(ma_long):
+                next_open_reason = "ma_long_breakdown"
+            elif (
+                next_open_reason is None
+                and chart["below_ma_count"] >= int(settings.breakdown_confirm_closes)
+                and float(close) < float(recent_swing_low)
+            ):
+                next_open_reason = "ma_and_swing_confirmed"
+        else:
+            if float(close) < float(ma_fast):
+                chart["below_fast_count"] += 1
+            else:
+                chart["below_fast_count"] = 0
+            if next_open_reason is None and (
+                chart["below_fast_count"] >= int(settings.breakdown_confirm_closes)
+                and float(close) < float(chart["entry_swing_low"])
+            ):
+                next_open_reason = "initial_structure_breakdown"
+            elif next_open_reason is None and (
+                current_trade_days >= int(settings.initial_days)
+                and float(chart["held_peak_close"]) < float(chart["progress_price"])
+                and float(close) < avg_cost
+                and float(close) < float(ma_fast)
+                and chart["below_fast_count"] >= int(settings.breakdown_confirm_closes)
+            ):
+                next_open_reason = "initial_failure"
+
+        if int(offset) == len(window) - 1:
+            current_reason = next_open_reason
+
+    disaster_trigger = min(float(chart["disaster_stop"]), float(current_close))
+    disaster_trigger = round_to_tick(disaster_trigger, tick, "down")
+    stop_limit = round_to_tick(
+        disaster_trigger * (1.0 - float(settings.limit_slippage_pct)),
+        tick,
+        "down",
+    )
+    return ChartExitRecommendation(
+        action="EXIT_NEXT_OPEN" if current_reason is not None else "HOLD",
+        reason=current_reason or "chart_hold",
+        stop_trigger_price=float(disaster_trigger),
+        stop_limit_price=float(stop_limit),
+        profile=profile,
+        position_scale=position_scale,
+        held_peak_close=float(chart["held_peak_close"]),
+        trend_active=bool(chart["trend"]),
+        trade_days=int(current_trade_days),
+        diagnostic=";".join(dict.fromkeys(diagnostics)),
+    )
 
 
 def _reentry_signal(

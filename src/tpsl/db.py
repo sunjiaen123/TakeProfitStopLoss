@@ -4,7 +4,7 @@ import re
 import json
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import pandas as pd
 
@@ -21,6 +21,29 @@ def _ident(value: str) -> str:
     if not _IDENTIFIER.fullmatch(value):
         raise ValueError(f"非法 SQL 标识符：{value!r}")
     return f"`{value}`"
+
+
+def _table_columns(connection: Any, table_name: str) -> set[str]:
+    from sqlalchemy import text
+
+    _ident(table_name)
+    if connection.dialect.name == "sqlite":
+        rows = connection.execute(
+            text(f"PRAGMA table_info({_ident(table_name)})")
+        ).fetchall()
+        return {str(row[1]) for row in rows}
+    rows = connection.execute(
+        text(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def create_engine(config: AppConfig) -> "Engine":
@@ -325,17 +348,32 @@ def upsert_recommendations(
 
     from sqlalchemy import text
 
-    table = _ident(config.database.tables["recommendations"])
-    columns = list(recommendations.columns)
-    for column in columns:
-        _ident(column)
-    column_sql = ", ".join(_ident(column) for column in columns)
-    values_sql = ", ".join(f":{column}" for column in columns)
-    insert_sql = text(
-        f"INSERT INTO {table} ({column_sql}) VALUES ({values_sql})"
-    )
-    records = recommendations.where(pd.notna(recommendations), None).to_dict("records")
+    raw_table_name = config.database.tables["recommendations"]
+    table = _ident(raw_table_name)
+    required = {"as_of_date", "symbol", "model_version"}
+    missing_output = required.difference(recommendations.columns)
+    if missing_output:
+        raise ValueError(f"recommendations missing required columns: {sorted(missing_output)}")
     with engine.begin() as connection:
+        existing_columns = _table_columns(connection, raw_table_name)
+        columns = [column for column in recommendations.columns if column in existing_columns]
+        missing_database = required.difference(columns)
+        if missing_database:
+            raise ValueError(
+                f"{raw_table_name} missing required columns: {sorted(missing_database)}"
+            )
+        for column in columns:
+            _ident(column)
+        column_sql = ", ".join(_ident(column) for column in columns)
+        values_sql = ", ".join(f":{column}" for column in columns)
+        insert_sql = text(
+            f"INSERT INTO {table} ({column_sql}) VALUES ({values_sql})"
+        )
+        clean = recommendations[columns].astype(object).where(
+            pd.notna(recommendations[columns]),
+            None,
+        )
+        records = clean.to_dict("records")
         keys = {
             (
                 record["as_of_date"],

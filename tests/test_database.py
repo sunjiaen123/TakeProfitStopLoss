@@ -1,7 +1,10 @@
 import unittest
+from types import SimpleNamespace
+
+import pandas as pd
 
 from tpsl.config import DatabaseConfig, load_config
-from tpsl.db import _schema_path, _split_sql_statements
+from tpsl.db import _schema_path, _split_sql_statements, upsert_recommendations
 
 
 class DatabaseTests(unittest.TestCase):
@@ -31,6 +34,9 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("COMMENT='股票基础信息表'", script)
         self.assertIn("dynamic_stop_gap_pct", script)
         self.assertIn("risk_model_version", script)
+        self.assertIn("strategy_profile", script)
+        self.assertIn("chart_exit_action", script)
+        self.assertIn("chart_exit_position_scale", script)
 
     def test_project_config_loads(self) -> None:
         config = load_config("config.toml")
@@ -65,6 +71,48 @@ class DatabaseTests(unittest.TestCase):
     def test_password_special_characters_are_encoded(self) -> None:
         config = DatabaseConfig(password="a@b:c/%")
         self.assertIn("a%40b%3Ac%2F%25", config.url)
+
+    def test_recommendation_upsert_ignores_unknown_chart_columns(self) -> None:
+        try:
+            from sqlalchemy import create_engine, text
+        except ImportError:
+            self.skipTest("SQLAlchemy is not installed")
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE tpsl_recommendations (
+                        as_of_date TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        model_version TEXT NOT NULL,
+                        reason TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+        config = SimpleNamespace(
+            database=SimpleNamespace(
+                tables={"recommendations": "tpsl_recommendations"}
+            )
+        )
+        frame = pd.DataFrame(
+            [
+                {
+                    "as_of_date": "2026-01-05",
+                    "symbol": "000001.SZ",
+                    "model_version": "model_1",
+                    "reason": "ok",
+                    "chart_exit_action": "EXIT_NEXT_OPEN",
+                }
+            ]
+        )
+        self.assertEqual(upsert_recommendations(engine, config, frame), 1)
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT reason FROM tpsl_recommendations")
+            ).fetchone()
+        self.assertEqual(row[0], "ok")
 
 
 if __name__ == "__main__":

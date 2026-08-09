@@ -188,12 +188,14 @@ limit_slippage_pct = 0.003
 entry_frequency = "monthly"
 
 [chart_exit]
-# 研究回测专用；不会改变 recommend 的生产止损。
+# Optional chart-aware production recommendation overlay.
 enabled = false
+production_profile = "S3_fast_scale_90"
+position_scale = 0.90
 max_symbols = 300
 holding_days = [20, 40, 60]
 lookahead_extend_days = 20
-initial_days = 8
+initial_days = 5
 progress_r = 1.0
 initial_min_gap_pct = 0.025
 entry_structure_buffer = 0.3
@@ -202,14 +204,14 @@ ma_fast = 10
 ma_trend = 20
 ma_long = 60
 ma_slope_lookback = 5
-breakdown_confirm_closes = 2
+breakdown_confirm_closes = 1
 swing_pivot_k = 2
 profit_tier_1_gain = 0.08
 profit_tier_1_floor_pct = 0.005
 profit_tier_2_gain = 0.15
-profit_tier_2_capture = 0.30
+profit_tier_2_capture = 0.50
 profit_tier_3_gain = 0.30
-profit_tier_3_capture = 0.45
+profit_tier_3_capture = 0.60
 reentry_cooldown_days = 2
 reentry_breakout_lookback = 10
 # 仅为防止异常频繁交易的工程保险，不代表必须重新上车几次。

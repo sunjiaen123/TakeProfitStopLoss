@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .chart_exit import add_chart_exit_indicators, recommend_chart_exit
 from .config import AppConfig
 from .db import (
     _ident,
@@ -219,6 +220,13 @@ def recommend_pipeline(
         except Exception as exc:
             volatility_state = None
             volatility_error = str(exc)
+    chart_histories: dict[str, pd.DataFrame] = {}
+    if config.chart_exit.enabled:
+        features = add_chart_exit_indicators(features, config)
+        chart_histories = {
+            str(symbol): group.copy()
+            for symbol, group in features.groupby("symbol", sort=False)
+        }
     current = _latest_rows_for_positions(features, positions, as_of_date)
     position_symbols = set(positions["symbol"].astype(str))
     current_symbols = (
@@ -356,6 +364,22 @@ def recommend_pipeline(
                 "；未配置动态风控模型，使用固定止损距离="
                 f"{config.recommendation.minimum_stop_gap_pct:.2%}"
             )
+        chart_decision = None
+        if config.chart_exit.enabled:
+            chart_decision = recommend_chart_exit(
+                chart_histories.get(str(row["symbol"]), pd.DataFrame()),
+                row,
+                as_of_date,
+                config,
+            )
+            reason += (
+                f"; chart_exit={chart_decision.profile}"
+                f" action={chart_decision.action}"
+                f" reason={chart_decision.reason}"
+                f" position_scale={chart_decision.position_scale:.2f}"
+            )
+            if chart_decision.diagnostic:
+                reason += f" diagnostic={chart_decision.diagnostic}"
         results.append(
             {
                 "as_of_date": as_of_date,
@@ -377,6 +401,37 @@ def recommend_pipeline(
                 "sample_count": int(neighbors["sample_count"]),
                 "model_version": bundle.version,
                 "risk_model_version": risk_model_version,
+                "strategy_profile": (
+                    chart_decision.profile if chart_decision else "B_production"
+                ),
+                "chart_exit_enabled": int(config.chart_exit.enabled),
+                "chart_exit_action": (
+                    chart_decision.action if chart_decision else "DISABLED"
+                ),
+                "chart_exit_reason": chart_decision.reason if chart_decision else None,
+                "chart_exit_stop_trigger_price": (
+                    chart_decision.stop_trigger_price if chart_decision else None
+                ),
+                "chart_exit_stop_limit_price": (
+                    chart_decision.stop_limit_price if chart_decision else None
+                ),
+                "chart_exit_position_scale": (
+                    chart_decision.position_scale if chart_decision else None
+                ),
+                "chart_exit_held_peak_close": (
+                    chart_decision.held_peak_close if chart_decision else None
+                ),
+                "chart_exit_trend_active": (
+                    int(bool(chart_decision.trend_active))
+                    if chart_decision and chart_decision.trend_active is not None
+                    else None
+                ),
+                "chart_exit_trade_days": (
+                    chart_decision.trade_days if chart_decision else None
+                ),
+                "chart_exit_diagnostic": (
+                    chart_decision.diagnostic if chart_decision else None
+                ),
                 "reason": reason,
             }
         )

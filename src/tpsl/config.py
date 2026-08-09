@@ -256,9 +256,11 @@ class ExitMachineConfig:
 
 @dataclass(frozen=True)
 class ChartExitConfig:
-    """Research-only chart-aware holding and re-entry backtest settings."""
+    """Chart-aware exit settings for research backtests and optional recommendations."""
 
     enabled: bool = False
+    production_profile: str = "S3_fast_scale_90"
+    position_scale: float = 0.90
     max_symbols: int = 300
     holding_days: tuple[int, ...] = (20, 40, 60)
     lookahead_extend_days: int = 20
@@ -1251,6 +1253,12 @@ def load_config(path: str | Path) -> AppConfig:
     chart_defaults = ChartExitConfig()
     chart_exit = ChartExitConfig(
         enabled=bool(chart_raw.get("enabled", chart_defaults.enabled)),
+        production_profile=str(
+            chart_raw.get("production_profile", chart_defaults.production_profile)
+        ),
+        position_scale=float(
+            chart_raw.get("position_scale", chart_defaults.position_scale)
+        ),
         max_symbols=int(chart_raw.get("max_symbols", chart_defaults.max_symbols)),
         holding_days=tuple(
             int(value)
@@ -1383,6 +1391,10 @@ def load_config(path: str | Path) -> AppConfig:
     )
     if chart_exit.max_symbols < 1:
         raise ValueError("chart_exit.max_symbols must be at least 1")
+    if not chart_exit.production_profile.strip():
+        raise ValueError("chart_exit.production_profile must be non-empty")
+    if not 0 < chart_exit.position_scale <= 1:
+        raise ValueError("chart_exit.position_scale must be between 0 and 1")
     if not chart_exit.holding_days or any(value < 1 for value in chart_exit.holding_days):
         raise ValueError("chart_exit.holding_days must contain positive integers")
     positive_integers = (

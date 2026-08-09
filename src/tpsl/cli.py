@@ -291,7 +291,55 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只计算和显示，不写入 MySQL",
     )
+
+    daily = subparsers.add_parser(
+        "daily",
+        help="同步当前持仓股票行情并生成最新推荐",
+    )
+    daily.add_argument(
+        "--end-date",
+        type=_parse_sync_end_date,
+        default=date.today(),
+        help="YYYY-MM-DD，或 today；默认 today",
+    )
+    daily.add_argument("--start-date", type=_parse_date)
+    daily.add_argument(
+        "--output",
+        default="output/current_stops.csv",
+        help="推荐结果 CSV 输出路径",
+    )
+    daily.add_argument(
+        "--write-db",
+        action="store_true",
+        help="写入 MySQL tpsl_recommendations；默认只 dry-run",
+    )
     return parser
+
+
+def _print_recommendations(frame) -> None:
+    if frame.empty:
+        print("没有有效持仓，无建议需要生成。")
+        return
+    display_columns = [
+        "symbol",
+        "close_price",
+        "take_profit_enabled",
+        "take_profit_price",
+        "stop_trigger_price",
+        "stop_limit_price",
+        "dynamic_stop_gap_pct",
+        "strategy_profile",
+        "chart_exit_action",
+        "chart_exit_reason",
+        "chart_exit_stop_trigger_price",
+        "chart_exit_position_scale",
+        "risk_reward_ratio",
+        "confidence",
+    ]
+    display_columns = [
+        column for column in display_columns if column in frame.columns
+    ]
+    print(frame[display_columns].to_string(index=False))
 
 
 def main() -> None:
@@ -313,6 +361,35 @@ def main() -> None:
                 start_date=args.start_date,
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return
+        if args.command == "daily":
+            sync_result = sync_market_data(
+                engine,
+                config,
+                end_date=args.end_date,
+                scope="positions",
+                start_date=args.start_date,
+            )
+            print("同步结果：")
+            print(json.dumps(sync_result, ensure_ascii=False, indent=2, default=str))
+            as_of_date = resolve_recommend_as_of_date(
+                engine,
+                config,
+                "latest",
+            )
+            print(f"使用最新完整持仓行情日：{as_of_date}")
+            frame = recommend_pipeline(
+                engine,
+                config,
+                as_of_date,
+                write_database=bool(args.write_db),
+            )
+            export_preview(frame, args.output)
+            if args.output:
+                print(f"推荐结果已输出：{args.output}")
+            if not args.write_db:
+                print("dry-run：未写入 MySQL。需要写库时加 --write-db。")
+            _print_recommendations(frame)
             return
         if args.command == "train":
             metadata = train_pipeline(engine, config, args.end_date)
@@ -433,24 +510,8 @@ def main() -> None:
             write_database=not args.dry_run,
         )
         export_preview(frame, args.output)
-        if frame.empty:
-            print("没有有效持仓，无建议需要生成。")
-            return
-        display_columns = [
-            "symbol",
-            "close_price",
-            "take_profit_enabled",
-            "take_profit_price",
-            "stop_trigger_price",
-            "stop_limit_price",
-            "dynamic_stop_gap_pct",
-            "risk_reward_ratio",
-            "confidence",
-        ]
-        display_columns = [
-            column for column in display_columns if column in frame.columns
-        ]
-        print(frame[display_columns].to_string(index=False))
+        _print_recommendations(frame)
+        return
     except Exception as exc:
         print(f"错误：{exc}", file=sys.stderr)
         raise SystemExit(1) from exc

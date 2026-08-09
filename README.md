@@ -152,6 +152,21 @@ tpsl --config config.toml train --end-date 2026-06-19
   --output output\recommendations-latest.csv
 ```
 
+PyCharm 一键日常运行可以用 `daily`，它会先同步当前持仓股票行情，再按最新完整行情日生成推荐。默认只 dry-run，不写入 MySQL：
+
+```powershell
+.\.venv\Scripts\tpsl.exe --config config.toml daily `
+  --output output\current_stops.csv
+```
+
+如果确认要把推荐写入 `tpsl_recommendations`，加 `--write-db`：
+
+```powershell
+.\.venv\Scripts\tpsl.exe --config config.toml daily `
+  --output output\current_stops.csv `
+  --write-db
+```
+
 确认结果后写回 MySQL：
 
 ```powershell

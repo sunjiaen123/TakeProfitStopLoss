@@ -12,6 +12,8 @@ from tpsl.chart_exit import (
     _simulate_hold,
     _simulate_chart,
     _simulate_one_path,
+    add_chart_exit_indicators,
+    recommend_chart_exit,
 )
 from tpsl.config import ChartExitConfig, PositionsConfig, RecommendationConfig
 
@@ -247,6 +249,89 @@ class ChartExitTests(unittest.TestCase):
         )
         self.assertEqual(ledger[-1]["exit_reason"], "horizon_exit")
         self.assertEqual(result["stopped"], 0)
+
+    def test_chart_indicators_are_available_for_production_recommendation(self) -> None:
+        dates = pd.date_range("2026-01-01", periods=8, freq="D")
+        frame = pd.DataFrame(
+            {
+                "symbol": ["000001.SZ"] * len(dates),
+                "trade_date": dates,
+                "raw_close": [10.0, 10.1, 10.2, 10.1, 10.3, 10.4, 10.2, 10.5],
+                "raw_high": [10.2, 10.3, 10.4, 10.3, 10.5, 10.6, 10.4, 10.7],
+                "raw_low": [9.8, 9.9, 10.0, 9.9, 10.1, 10.2, 10.0, 10.3],
+            }
+        )
+        config = SimpleNamespace(
+            chart_exit=ChartExitConfig(
+                ma_fast=3,
+                ma_trend=4,
+                ma_long=5,
+                ma_slope_lookback=1,
+                reentry_breakout_lookback=3,
+            )
+        )
+        output = add_chart_exit_indicators(frame, config)
+        for column in (
+            "ma_fast",
+            "ma_trend",
+            "ma_long",
+            "ma_trend_slope",
+            "recent_swing_low",
+            "prior_breakout_high",
+        ):
+            self.assertIn(column, output.columns)
+        self.assertTrue(np.isfinite(output.iloc[-1]["ma_fast"]))
+
+    def test_recommend_chart_exit_emits_s3_initial_failure(self) -> None:
+        dates = pd.date_range("2026-01-01", periods=5, freq="D")
+        closes = [10.0, 9.95, 9.90, 9.85, 9.80]
+        history = pd.DataFrame(
+            [
+                {
+                    "symbol": "000001.SZ",
+                    "trade_date": dates[index],
+                    "raw_close": close,
+                    "raw_high": close + 0.1,
+                    "raw_low": close - 0.1,
+                    "atr_14_pct": 0.02,
+                    "ma_fast": close + 0.05,
+                    "ma_trend": 10.5,
+                    "ma_long": 10.4,
+                    "ma_trend_slope": -0.01,
+                    "recent_swing_low": 9.0,
+                }
+                for index, close in enumerate(closes)
+            ]
+        )
+        config = SimpleNamespace(
+            chart_exit=ChartExitConfig(
+                enabled=True,
+                production_profile="S3_fast_scale_90",
+                position_scale=0.90,
+                initial_days=5,
+                breakdown_confirm_closes=1,
+            ),
+            positions=PositionsConfig(default_max_loss_pct=0.05),
+            recommendation=RecommendationConfig(price_tick=0.01),
+        )
+        decision = recommend_chart_exit(
+            history,
+            {
+                "symbol": "000001.SZ",
+                "entry_date": dates[0].date(),
+                "avg_cost": 10.0,
+                "max_loss_pct": 0.05,
+            },
+            dates[-1].date(),
+            config,
+        )
+        self.assertEqual(decision.action, "EXIT_NEXT_OPEN")
+        self.assertEqual(decision.reason, "initial_failure")
+        self.assertEqual(decision.profile, "S3_fast_scale_90")
+        self.assertAlmostEqual(decision.position_scale, 0.90)
+        self.assertEqual(decision.trade_days, 5)
+        self.assertAlmostEqual(decision.stop_trigger_price, 9.50)
+        self.assertAlmostEqual(decision.stop_limit_price, 9.47)
 
 
 if __name__ == "__main__":
