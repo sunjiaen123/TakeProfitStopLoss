@@ -484,6 +484,10 @@ B = 现生产：同一 make_risk_decision，使用配置里的 atr_stop_multipli
 
 ## 当前边界
 
+- `sync-data --scope positions` 支持沪深 ETF 持仓（例如 `513770.SH`、`159915.SZ`）；BaoStock 按 ETF 类型读取，自动切换 AkShare 时使用 ETF 行情接口。
+- `sync-data --scope all` 仍只批量同步普通 A 股，不会把全市场 ETF 混入股票训练池；只有实际持仓 ETF 会按需同步。
+- `data_sync.source = "auto"` 时，BaoStock 登录、超时、网络接收或 API 查询失败都会自动切换 AkShare；显式配置 `baostock` 时不会静默切源。
+
 - 日线无法判断同一天内止盈和止损哪个先触发，严谨回测需要分钟线；
 - 暂未处理 ST、科创板、创业板、北交所各自的涨跌停规则；
 - 暂未处理除权除息导致的持仓成本和条件单价格调整；
