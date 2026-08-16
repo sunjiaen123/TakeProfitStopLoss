@@ -44,12 +44,12 @@ class DataSyncTests(unittest.TestCase):
         self.assertEqual(_supported_baostock_types(False), {"1"})
         self.assertEqual(_supported_baostock_types(True), {"1", "5"})
 
-    def test_auto_source_falls_back_on_baostock_network_error(self) -> None:
+    def test_auto_stock_source_falls_back_on_baostock_network_error(self) -> None:
         import pandas as pd
         from datetime import date
 
         fallback = pd.DataFrame(
-            [{"symbol": "513770.SH", "security_type": "etf"}]
+            [{"symbol": "601838.SH", "security_type": "stock"}]
         )
         with patch(
             "tpsl.data_sync.fetch_baostock_universe",
@@ -64,12 +64,68 @@ class DataSyncTests(unittest.TestCase):
                 retry_count=1,
                 retry_delay=0.0,
                 socket_timeout=1.0,
+                include_etfs=False,
+            )
+
+        self.assertEqual(source, "akshare")
+        self.assertEqual(universe.loc[0, "symbol"], "601838.SH")
+        akshare_fetch.assert_called_once_with(date(2026, 8, 12), False)
+
+    def test_auto_etf_source_prefers_akshare(self) -> None:
+        import pandas as pd
+        from datetime import date
+
+        universe_frame = pd.DataFrame(
+            [{"symbol": "513770.SH", "security_type": "etf"}]
+        )
+        with patch(
+            "tpsl.data_sync.fetch_akshare_universe",
+            return_value=universe_frame,
+        ) as akshare_fetch, patch(
+            "tpsl.data_sync.fetch_baostock_universe"
+        ) as baostock_fetch:
+            universe, source = fetch_universe(
+                "auto",
+                date(2026, 8, 16),
+                retry_count=1,
+                retry_delay=0.0,
+                socket_timeout=1.0,
                 include_etfs=True,
             )
 
         self.assertEqual(source, "akshare")
         self.assertEqual(universe.loc[0, "symbol"], "513770.SH")
-        akshare_fetch.assert_called_once_with(date(2026, 8, 12), True)
+        akshare_fetch.assert_called_once_with(date(2026, 8, 16), True)
+        baostock_fetch.assert_not_called()
+
+    def test_auto_etf_source_falls_back_to_baostock(self) -> None:
+        import pandas as pd
+        from datetime import date
+
+        fallback = pd.DataFrame(
+            [{"symbol": "513770.SH", "security_type": "etf"}]
+        )
+        with patch(
+            "tpsl.data_sync.fetch_akshare_universe",
+            side_effect=RuntimeError("ETF 列表不可用"),
+        ), patch(
+            "tpsl.data_sync.fetch_baostock_universe",
+            return_value=fallback,
+        ) as baostock_fetch:
+            universe, source = fetch_universe(
+                "auto",
+                date(2026, 8, 16),
+                retry_count=1,
+                retry_delay=0.0,
+                socket_timeout=1.0,
+                include_etfs=True,
+            )
+
+        self.assertEqual(source, "baostock")
+        self.assertEqual(universe.loc[0, "symbol"], "513770.SH")
+        baostock_fetch.assert_called_once_with(
+            date(2026, 8, 16), 1, 0.0, 1.0, True
+        )
 
     def test_explicit_baostock_source_does_not_fall_back(self) -> None:
         from datetime import date
@@ -102,7 +158,7 @@ class DataSyncTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "BaoStock 与 AkShare 均不可用",
+                "AkShare 与 BaoStock 均不可用",
             ) as caught:
                 fetch_universe(
                     "auto",
@@ -200,6 +256,48 @@ class DataSyncTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["symbol"], "513770.SH")
         self.assertEqual(result["rows"][0]["industry_code"], "ETF")
         self.assertEqual(endpoint.call_count, 2)
+
+    def test_akshare_etf_history_falls_back_to_sina(self) -> None:
+        import pandas as pd
+
+        sina_history = pd.DataFrame(
+            [
+                {
+                    "date": "2026-08-14",
+                    "open": "0.363",
+                    "high": "0.365",
+                    "low": "0.359",
+                    "close": "0.361",
+                    "volume": "1183707599",
+                    "amount": "428334704",
+                }
+            ]
+        )
+        with patch(
+            "akshare.fund_etf_hist_em",
+            side_effect=ConnectionError("remote closed"),
+        ), patch(
+            "akshare.fund_etf_hist_sina",
+            return_value=sina_history,
+        ) as sina_endpoint:
+            result = _download_symbol_akshare(
+                (
+                    "513770.SH",
+                    "2026-08-01",
+                    "2026-08-16",
+                    "ETF",
+                    "etf",
+                    1,
+                    0.0,
+                    1.0,
+                )
+            )
+
+        self.assertEqual(result["error"], "")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["trade_date"], "2026-08-14")
+        self.assertEqual(result["rows"][0]["source"], "AKSHARE_SINA")
+        sina_endpoint.assert_called_once_with(symbol="sh513770")
 
 
 if __name__ == "__main__":

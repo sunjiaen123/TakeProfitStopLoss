@@ -360,6 +360,32 @@ def fetch_universe(
         )
     if source != "auto":
         raise ValueError("data_sync.source 只支持 baostock、akshare 或 auto")
+
+    if include_etfs:
+        # BaoStock SDK 在大列表分页时可能吞掉 timeout/UnicodeDecodeError，
+        # 只打印错误并把不完整结果当作正常结束，外层无法可靠触发 fallback。
+        # ETF 持仓因此优先使用 AkShare 的专用 ETF 列表和历史接口。
+        try:
+            return fetch_akshare_universe(as_of_date, True), "akshare"
+        except Exception as exc:
+            print(f"AkShare 不可用，自动回退 BaoStock：{exc}", flush=True)
+            try:
+                return (
+                    fetch_baostock_universe(
+                        as_of_date,
+                        retry_count,
+                        retry_delay,
+                        socket_timeout,
+                        True,
+                    ),
+                    "baostock",
+                )
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "AkShare 与 BaoStock 均不可用。"
+                    f"AkShare：{exc}；BaoStock：{fallback_exc}"
+                ) from fallback_exc
+
     try:
         return (
             fetch_baostock_universe(
@@ -587,6 +613,33 @@ def _normalize_akshare_hist(frame: pd.DataFrame) -> pd.DataFrame:
     return output.sort_values("date").reset_index(drop=True)
 
 
+def _normalize_akshare_sina_etf_hist(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {"date", "open", "high", "low", "close"}
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise RuntimeError(
+            f"AkShare 新浪 ETF 日线缺少必要列：{missing}，"
+            f"实际列：{list(frame.columns)}"
+        )
+    output = frame.copy()
+    numeric_columns = [
+        column
+        for column in ("open", "high", "low", "close", "volume", "amount")
+        if column in output.columns
+    ]
+    output[numeric_columns] = output[numeric_columns].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    output["date"] = pd.to_datetime(output["date"], errors="coerce")
+    output = output.dropna(subset=["date", "open", "high", "low", "close"])
+    output["date"] = output["date"].dt.date.astype(str)
+    output = output.loc[
+        output[["open", "high", "low", "close"]].gt(0).all(axis=1)
+    ].copy()
+    return output.sort_values("date").reset_index(drop=True)
+
+
 def _download_symbol_akshare(
     task: tuple[str, str, str, str, str, int, float, float],
 ) -> dict[str, Any]:
@@ -620,35 +673,65 @@ def _download_symbol_akshare(
                 if security_type == SECURITY_TYPE_ETF
                 else ak.stock_zh_a_hist
             )
-            raw = history_function(
-                symbol=code,
-                period="daily",
-                start_date=start_value,
-                end_date=end_value,
-                adjust="",
-            )
-            if raw is None or raw.empty:
-                return {"symbol": symbol, "rows": [], "error": ""}
-            raw = _normalize_akshare_hist(raw)
-
-            adjusted_close = pd.DataFrame(columns=["date", "adjusted_close"])
+            used_sina_fallback = False
             try:
-                adjusted = history_function(
+                raw = history_function(
                     symbol=code,
                     period="daily",
                     start_date=start_value,
                     end_date=end_value,
-                    adjust="qfq",
+                    adjust="",
                 )
-                if adjusted is not None and not adjusted.empty:
-                    adjusted = _normalize_akshare_hist(adjusted)
-                    adjusted_close = adjusted[["date", "close"]].rename(
-                        columns={"close": "adjusted_close"}
-                    )
-            except Exception:
-                adjusted_close = pd.DataFrame(columns=["date", "adjusted_close"])
+                if raw is None or raw.empty:
+                    if security_type != SECURITY_TYPE_ETF:
+                        return {"symbol": symbol, "rows": [], "error": ""}
+                    raise RuntimeError("东方财富 ETF 日线返回空结果")
+                raw = _normalize_akshare_hist(raw)
+            except Exception as primary_exc:
+                if security_type != SECURITY_TYPE_ETF:
+                    raise
+                sina_symbol = to_baostock_code(symbol).replace(".", "")
+                try:
+                    raw = ak.fund_etf_hist_sina(symbol=sina_symbol)
+                    if raw is None or raw.empty:
+                        raise RuntimeError("新浪 ETF 日线返回空结果")
+                    raw = _normalize_akshare_sina_etf_hist(raw)
+                    raw = raw.loc[
+                        raw["date"].between(start_date, end_date)
+                    ].copy()
+                    used_sina_fallback = True
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        "AkShare ETF 历史双接口均失败。"
+                        f"东方财富：{primary_exc}；新浪：{fallback_exc}"
+                    ) from fallback_exc
 
-            raw = raw.merge(adjusted_close, on="date", how="left")
+            adjusted_close = pd.DataFrame(columns=["date", "adjusted_close"])
+            if not used_sina_fallback:
+                try:
+                    adjusted = history_function(
+                        symbol=code,
+                        period="daily",
+                        start_date=start_value,
+                        end_date=end_value,
+                        adjust="qfq",
+                    )
+                    if adjusted is not None and not adjusted.empty:
+                        adjusted = _normalize_akshare_hist(adjusted)
+                        adjusted_close = adjusted[["date", "close"]].rename(
+                            columns={"close": "adjusted_close"}
+                        )
+                except Exception:
+                    adjusted_close = pd.DataFrame(
+                        columns=["date", "adjusted_close"]
+                    )
+
+            if adjusted_close.empty:
+                raw["adjusted_close"] = pd.to_numeric(
+                    raw["close"], errors="coerce"
+                )
+            else:
+                raw = raw.merge(adjusted_close, on="date", how="left")
             if "change_amount" in raw.columns:
                 raw["pre_close"] = raw["close"] - raw["change_amount"]
             else:
@@ -673,7 +756,11 @@ def _download_symbol_akshare(
                         "adj_factor": row["adj_factor"],
                         "industry_code": industry_code or "UNKNOWN",
                         "is_suspended": 0,
-                        "source": "AKSHARE",
+                        "source": (
+                            "AKSHARE_SINA"
+                            if used_sina_fallback
+                            else "AKSHARE"
+                        ),
                     }
                 )
             return {"symbol": symbol, "rows": records, "error": ""}
