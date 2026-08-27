@@ -489,6 +489,8 @@ B = 现生产：同一 make_risk_decision，使用配置里的 atr_stop_multipli
 - `data_sync.source = "auto"` 时，BaoStock 登录、超时、网络接收或 API 查询失败都会自动切换 AkShare；显式配置 `baostock` 时不会静默切源。
 - `auto` 检测到持仓中包含 ETF 时会优先 AkShare，避免 BaoStock SDK 在证券列表分页时吞掉超时或编码异常；AkShare 失败后仍会回退 BaoStock。
 - ETF 日线优先使用 AkShare 东方财富接口；若远端断连或返回空结果，会自动改用新浪 ETF 历史接口，并在行情 `source` 中记录为 `AKSHARE_SINA`。
+- `sync-data --scope positions` 不再下载远端全市场证券列表，而是从持仓代码和本地 `stock_master` 构造目标清单；`auto` 直接逐股使用 AkShare，东方财富普通股票日线失败时自动改用新浪日线。
+- 持仓代码会校验交易所后缀，例如 `603993.SZ` 会明确提示应改为 `603993.SH`，避免行情写入错误证券代码。
 
 - 日线无法判断同一天内止盈和止损哪个先触发，严谨回测需要分钟线；
 - 暂未处理 ST、科创板、创业板、北交所各自的涨跌停规则；

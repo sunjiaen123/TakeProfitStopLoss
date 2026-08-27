@@ -97,6 +97,82 @@ def _looks_like_etf_symbol(symbol: str) -> bool:
     ) or (exchange == "SZ" and code.startswith("159"))
 
 
+def _security_details_for_symbol(symbol: str) -> tuple[str, str]:
+    normalized = str(symbol).strip().upper()
+    code = to_akshare_code(normalized)
+    _code, exchange = normalized.split(".", 1)
+    if code.startswith(("51", "52", "56", "58")):
+        expected_exchange = "SH"
+        security_type = SECURITY_TYPE_ETF
+    elif code.startswith("159"):
+        expected_exchange = "SZ"
+        security_type = SECURITY_TYPE_ETF
+    else:
+        expected_exchange = _exchange_for_akshare_code(code)
+        security_type = SECURITY_TYPE_STOCK
+    if exchange != expected_exchange:
+        raise ValueError(
+            f"证券代码交易所后缀错误：{normalized} 应为 "
+            f"{code}.{expected_exchange}"
+        )
+    return security_type, expected_exchange
+
+
+def _position_universe(engine: Any, symbols: list[str]) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+    details = {
+        symbol: _security_details_for_symbol(symbol)
+        for symbol in symbols
+    }
+    metadata: dict[str, dict[str, Any]] = {}
+    try:
+        query = (
+            text(
+                """
+                SELECT sm.symbol, sm.stock_name, sm.industry_code,
+                       sm.list_date, sm.delist_date
+                FROM stock_master sm
+                INNER JOIN (
+                    SELECT symbol, MAX(id) AS latest_id
+                    FROM stock_master
+                    WHERE symbol IN :symbols
+                    GROUP BY symbol
+                ) latest ON latest.latest_id = sm.id
+                """
+            )
+            .bindparams(bindparam("symbols", expanding=True))
+        )
+        with engine.connect() as connection:
+            for row in connection.execute(query, {"symbols": symbols}).mappings():
+                metadata[str(row["symbol"])] = dict(row)
+    except Exception:
+        # stock_master 只用于补名称/行业；缺失时仍可按持仓代码同步行情。
+        metadata = {}
+
+    records: list[dict[str, Any]] = []
+    for symbol in symbols:
+        security_type, _exchange = details[symbol]
+        known = metadata.get(symbol, {})
+        industry = (
+            "ETF"
+            if security_type == SECURITY_TYPE_ETF
+            else str(known.get("industry_code") or "UNKNOWN")
+        )
+        records.append(
+            {
+                "code": to_akshare_code(symbol),
+                "code_name": str(known.get("stock_name") or ""),
+                "ipoDate": known.get("list_date"),
+                "outDate": known.get("delist_date") or "",
+                "industry": industry,
+                "symbol": symbol,
+                "security_type": security_type,
+            }
+        )
+    return pd.DataFrame(records)
+
+
 def _supported_baostock_types(include_etfs: bool) -> set[str]:
     supported = {"1"}
     if include_etfs:
@@ -613,18 +689,28 @@ def _normalize_akshare_hist(frame: pd.DataFrame) -> pd.DataFrame:
     return output.sort_values("date").reset_index(drop=True)
 
 
-def _normalize_akshare_sina_etf_hist(frame: pd.DataFrame) -> pd.DataFrame:
+def _normalize_akshare_sina_hist(frame: pd.DataFrame) -> pd.DataFrame:
     required = {"date", "open", "high", "low", "close"}
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise RuntimeError(
-            f"AkShare 新浪 ETF 日线缺少必要列：{missing}，"
+            f"AkShare 新浪日线缺少必要列：{missing}，"
             f"实际列：{list(frame.columns)}"
         )
     output = frame.copy()
+    if "turnover" in output.columns and "turn" not in output.columns:
+        output = output.rename(columns={"turnover": "turn"})
     numeric_columns = [
         column
-        for column in ("open", "high", "low", "close", "volume", "amount")
+        for column in (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "turn",
+        )
         if column in output.columns
     ]
     output[numeric_columns] = output[numeric_columns].apply(
@@ -674,6 +760,9 @@ def _download_symbol_akshare(
                 else ak.stock_zh_a_hist
             )
             used_sina_fallback = False
+            sina_adjusted_close = pd.DataFrame(
+                columns=["date", "adjusted_close"]
+            )
             try:
                 raw = history_function(
                     symbol=code,
@@ -683,30 +772,51 @@ def _download_symbol_akshare(
                     adjust="",
                 )
                 if raw is None or raw.empty:
-                    if security_type != SECURITY_TYPE_ETF:
-                        return {"symbol": symbol, "rows": [], "error": ""}
-                    raise RuntimeError("东方财富 ETF 日线返回空结果")
+                    raise RuntimeError("东方财富日线返回空结果")
                 raw = _normalize_akshare_hist(raw)
             except Exception as primary_exc:
-                if security_type != SECURITY_TYPE_ETF:
-                    raise
                 sina_symbol = to_baostock_code(symbol).replace(".", "")
                 try:
-                    raw = ak.fund_etf_hist_sina(symbol=sina_symbol)
+                    if security_type == SECURITY_TYPE_ETF:
+                        raw = ak.fund_etf_hist_sina(symbol=sina_symbol)
+                    else:
+                        raw = ak.stock_zh_a_daily(
+                            symbol=sina_symbol,
+                            start_date=start_value,
+                            end_date=end_value,
+                            adjust="",
+                        )
                     if raw is None or raw.empty:
-                        raise RuntimeError("新浪 ETF 日线返回空结果")
-                    raw = _normalize_akshare_sina_etf_hist(raw)
+                        raise RuntimeError("新浪日线返回空结果")
+                    raw = _normalize_akshare_sina_hist(raw)
                     raw = raw.loc[
                         raw["date"].between(start_date, end_date)
                     ].copy()
+                    if security_type == SECURITY_TYPE_STOCK:
+                        try:
+                            adjusted = ak.stock_zh_a_daily(
+                                symbol=sina_symbol,
+                                start_date=start_value,
+                                end_date=end_value,
+                                adjust="qfq",
+                            )
+                            if adjusted is not None and not adjusted.empty:
+                                adjusted = _normalize_akshare_sina_hist(adjusted)
+                                sina_adjusted_close = adjusted[
+                                    ["date", "close"]
+                                ].rename(columns={"close": "adjusted_close"})
+                        except Exception:
+                            sina_adjusted_close = pd.DataFrame(
+                                columns=["date", "adjusted_close"]
+                            )
                     used_sina_fallback = True
                 except Exception as fallback_exc:
                     raise RuntimeError(
-                        "AkShare ETF 历史双接口均失败。"
+                        "AkShare 历史双接口均失败。"
                         f"东方财富：{primary_exc}；新浪：{fallback_exc}"
                     ) from fallback_exc
 
-            adjusted_close = pd.DataFrame(columns=["date", "adjusted_close"])
+            adjusted_close = sina_adjusted_close
             if not used_sina_fallback:
                 try:
                     adjusted = history_function(
@@ -946,23 +1056,42 @@ def sync_market_data(
     if scope == "positions":
         positions = load_positions(engine, config)
         symbols = sorted(positions["symbol"].astype(str).unique().tolist())
+        if not symbols:
+            return {
+                "source": config.data_sync.source,
+                "scope": scope,
+                "symbols": 0,
+                "successful_symbols": 0,
+                "failed_symbols": 0,
+                "bar_rows": 0,
+            }
+        try:
+            universe = _position_universe(engine, symbols)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"持仓证券代码无效：{exc}。请先修正 stock_positions.symbol"
+            ) from exc
+        configured_source = config.data_sync.source.lower()
+        if configured_source not in SUPPORTED_DATA_SOURCES:
+            raise ValueError("data_sync.source 只支持 baostock、akshare 或 auto")
+        # 持仓同步无需先下载全市场证券列表。auto 直接使用 AkShare
+        # 的逐股接口，避免 BaoStock 黑名单和东方财富全市场列表故障。
+        source_used = (
+            "akshare" if configured_source == "auto" else configured_source
+        )
     elif scope == "all":
         positions = pd.DataFrame()
         symbols = []
+        universe, source_used = fetch_universe(
+            config.data_sync.source,
+            end_date,
+            config.data_sync.retry_count,
+            config.data_sync.retry_delay_seconds,
+            config.data_sync.socket_timeout_seconds,
+            include_etfs=False,
+        )
     else:
         raise ValueError("scope 必须是 positions 或 all")
-
-    include_etfs = scope == "positions" and any(
-        _looks_like_etf_symbol(symbol) for symbol in symbols
-    )
-    universe, source_used = fetch_universe(
-        config.data_sync.source,
-        end_date,
-        config.data_sync.retry_count,
-        config.data_sync.retry_delay_seconds,
-        config.data_sync.socket_timeout_seconds,
-        include_etfs=include_etfs,
-    )
 
     if scope == "all":
         symbols = sorted(

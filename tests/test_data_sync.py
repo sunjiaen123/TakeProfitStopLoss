@@ -11,6 +11,8 @@ from tpsl.data_sync import (
     _is_fatal_login_error,
     _sanitize_records,
     _price_limit,
+    _position_universe,
+    _security_details_for_symbol,
     _supported_baostock_types,
     fetch_universe,
     from_akshare_code,
@@ -39,6 +41,32 @@ class DataSyncTests(unittest.TestCase):
         self.assertFalse(_looks_like_etf_symbol("601838.SH"))
         with self.assertRaises(ValueError):
             from_akshare_etf_code("601838")
+
+    def test_position_symbols_validate_exchange_suffix(self) -> None:
+        self.assertEqual(
+            _security_details_for_symbol("603993.SH"),
+            ("stock", "SH"),
+        )
+        self.assertEqual(
+            _security_details_for_symbol("002636.SZ"),
+            ("stock", "SZ"),
+        )
+        with self.assertRaisesRegex(ValueError, "603993.SH"):
+            _security_details_for_symbol("603993.SZ")
+
+    def test_position_universe_does_not_need_remote_market_list(self) -> None:
+        universe = _position_universe(
+            object(),
+            ["002636.SZ", "603993.SH", "513770.SH"],
+        )
+        self.assertEqual(
+            universe["symbol"].tolist(),
+            ["002636.SZ", "603993.SH", "513770.SH"],
+        )
+        self.assertEqual(
+            universe["security_type"].tolist(),
+            ["stock", "stock", "etf"],
+        )
 
     def test_baostock_etfs_are_opt_in(self) -> None:
         self.assertEqual(_supported_baostock_types(False), {"1"})
@@ -298,6 +326,50 @@ class DataSyncTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["trade_date"], "2026-08-14")
         self.assertEqual(result["rows"][0]["source"], "AKSHARE_SINA")
         sina_endpoint.assert_called_once_with(symbol="sh513770")
+
+    def test_akshare_stock_history_falls_back_to_sina(self) -> None:
+        import pandas as pd
+
+        sina_history = pd.DataFrame(
+            [
+                {
+                    "date": "2026-08-21",
+                    "open": "405.0",
+                    "high": "411.0",
+                    "low": "400.1",
+                    "close": "409.06",
+                    "volume": "34076661",
+                    "amount": "13868010000",
+                    "turnover": "0.050975",
+                }
+            ]
+        )
+        with patch(
+            "akshare.stock_zh_a_hist",
+            side_effect=ConnectionError("eastmoney unavailable"),
+        ), patch(
+            "akshare.stock_zh_a_daily",
+            return_value=sina_history,
+        ) as sina_endpoint:
+            result = _download_symbol_akshare(
+                (
+                    "603986.SH",
+                    "2026-08-21",
+                    "2026-08-21",
+                    "UNKNOWN",
+                    "stock",
+                    1,
+                    0.0,
+                    1.0,
+                )
+            )
+
+        self.assertEqual(result["error"], "")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["trade_date"], "2026-08-21")
+        self.assertEqual(result["rows"][0]["source"], "AKSHARE_SINA")
+        self.assertAlmostEqual(result["rows"][0]["turnover_rate"], 0.050975)
+        self.assertEqual(sina_endpoint.call_count, 2)
 
 
 if __name__ == "__main__":
