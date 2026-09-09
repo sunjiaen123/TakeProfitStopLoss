@@ -46,6 +46,15 @@ class ChartExitRecommendation:
     held_peak_close: float | None = None
     trend_active: bool | None = None
     trade_days: int | None = None
+    initial_stop_price: float | None = None
+    progress_price: float | None = None
+    profit_floor_price: float | None = None
+    entry_swing_low: float | None = None
+    ma_fast_price: float | None = None
+    ma_trend_price: float | None = None
+    ma_long_price: float | None = None
+    ma_trend_slope: float | None = None
+    recent_swing_low: float | None = None
     diagnostic: str = ""
 NO_EXIT_OUTCOMES = {
     "NO_TRIGGER_CLOSE",
@@ -944,6 +953,15 @@ def recommend_chart_exit(
         held_peak_close=float(chart["held_peak_close"]),
         trend_active=bool(chart["trend"]),
         trade_days=int(current_trade_days),
+        initial_stop_price=float(chart["initial_stop"]),
+        progress_price=float(chart["progress_price"]),
+        profit_floor_price=(float(floor) if np.isfinite(floor) else None),
+        entry_swing_low=float(chart["entry_swing_low"]),
+        ma_fast_price=float(ma_fast),
+        ma_trend_price=float(ma_trend),
+        ma_long_price=float(ma_long),
+        ma_trend_slope=float(ma_slope),
+        recent_swing_low=float(recent_swing_low),
         diagnostic=";".join(dict.fromkeys(diagnostics)),
     )
 

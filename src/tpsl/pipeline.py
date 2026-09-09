@@ -31,6 +31,18 @@ from .volatility_stop import (
 )
 
 
+S3_OPERATIONAL_COLUMNS = (
+    "as_of_date",
+    "symbol",
+    "close_price",
+    "avg_cost",
+    "chart_exit_action",
+    "chart_exit_reason",
+    "chart_exit_stop_trigger_price",
+    "chart_exit_stop_limit_price",
+)
+
+
 def train_pipeline(
     engine: Any,
     config: AppConfig,
@@ -250,6 +262,88 @@ def recommend_pipeline(
     if current.empty:
         raise RuntimeError("持仓股票因历史长度不足或数据缺失，无法生成完整特征")
 
+    # S3 is a complete exit strategy, not an auxiliary annotation on the
+    # legacy next-day prediction.  When it is enabled, keep the public output
+    # and the canonical stop prices exclusively on the S3 path.  This also
+    # avoids loading the old model/similarity artifacts for an S3 run.
+    if config.chart_exit.enabled:
+        results: list[dict[str, Any]] = []
+        database_results: list[dict[str, Any]] = []
+        for _, row in current.iterrows():
+            chart_decision = recommend_chart_exit(
+                chart_histories.get(str(row["symbol"]), pd.DataFrame()),
+                row,
+                as_of_date,
+                config,
+            )
+            model_version = f"chart_exit:{chart_decision.profile}"
+            public_record = {
+                "as_of_date": as_of_date,
+                "symbol": str(row["symbol"]),
+                "close_price": float(row.get("raw_close", row["close"])),
+                "avg_cost": float(row["avg_cost"]),
+                "model_version": model_version,
+                "strategy_profile": chart_decision.profile,
+                "chart_exit_action": chart_decision.action,
+                "chart_exit_reason": chart_decision.reason,
+                "chart_exit_stop_trigger_price": chart_decision.stop_trigger_price,
+                "chart_exit_stop_limit_price": chart_decision.stop_limit_price,
+                "chart_exit_position_scale": chart_decision.position_scale,
+                "chart_exit_trend_active": (
+                    int(bool(chart_decision.trend_active))
+                    if chart_decision.trend_active is not None
+                    else None
+                ),
+                "chart_exit_trade_days": chart_decision.trade_days,
+                "chart_exit_held_peak_close": chart_decision.held_peak_close,
+                "chart_exit_initial_stop_price": chart_decision.initial_stop_price,
+                "chart_exit_progress_price": chart_decision.progress_price,
+                "chart_exit_profit_floor_price": chart_decision.profit_floor_price,
+                "chart_exit_entry_swing_low": chart_decision.entry_swing_low,
+                "chart_exit_ma_fast_price": chart_decision.ma_fast_price,
+                "chart_exit_ma_trend_price": chart_decision.ma_trend_price,
+                "chart_exit_ma_long_price": chart_decision.ma_long_price,
+                "chart_exit_ma_trend_slope": chart_decision.ma_trend_slope,
+                "chart_exit_recent_swing_low": chart_decision.recent_swing_low,
+                "chart_exit_diagnostic": chart_decision.diagnostic,
+            }
+            results.append(public_record)
+
+            # Keep old NOT NULL database columns populated for installations
+            # created with the original schema.  These are compatibility
+            # placeholders, not legacy strategy calculations.  Canonical stop
+            # columns contain the same S3 prices as chart_exit_*.
+            database_results.append(
+                {
+                    **public_record,
+                    "take_profit_price": None,
+                    "take_profit_enabled": 0,
+                    "take_profit_reason": "S3 不设置固定止盈单",
+                    "stop_trigger_price": chart_decision.stop_trigger_price,
+                    "stop_limit_price": chart_decision.stop_limit_price,
+                    "dynamic_stop_gap_pct": None,
+                    "predicted_high_return": 0.0,
+                    "predicted_low_return": 0.0,
+                    "similar_high_return": None,
+                    "similar_low_return": None,
+                    "risk_reward_ratio": None,
+                    "confidence": 0.0,
+                    "sample_count": 0,
+                    "risk_model_version": None,
+                    "chart_exit_enabled": 1,
+                    "reason": (
+                        f"S3={chart_decision.profile}；"
+                        f"action={chart_decision.action}；"
+                        f"reason={chart_decision.reason}"
+                    ),
+                }
+            )
+
+        output = pd.DataFrame(results)
+        if write_database:
+            upsert_recommendations(engine, config, pd.DataFrame(database_results))
+        return output
+
     bundle = ModelBundle(config.artifacts_directory)
     similarity = SimilarityIndex(config.artifacts_directory)
     risk_model: RiskStopModel | None = None
@@ -442,9 +536,21 @@ def recommend_pipeline(
     return output
 
 
+def recommendation_preview_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the compact operator-facing view while retaining full DB detail."""
+    if frame.empty or "chart_exit_action" not in frame.columns:
+        return frame
+    columns = [column for column in S3_OPERATIONAL_COLUMNS if column in frame.columns]
+    return frame.loc[:, columns].copy()
+
+
 def export_preview(frame: pd.DataFrame, output_path: str | Path | None) -> None:
     if output_path is None or frame.empty:
         return
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False, encoding="utf-8-sig")
+    recommendation_preview_frame(frame).to_csv(
+        path,
+        index=False,
+        encoding="utf-8-sig",
+    )

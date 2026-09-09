@@ -332,6 +332,13 @@ class ChartExitTests(unittest.TestCase):
         self.assertEqual(decision.trade_days, 5)
         self.assertAlmostEqual(decision.stop_trigger_price, 9.50)
         self.assertAlmostEqual(decision.stop_limit_price, 9.47)
+        self.assertAlmostEqual(decision.initial_stop_price, 9.50)
+        self.assertGreater(decision.progress_price, 10.0)
+        self.assertAlmostEqual(decision.ma_fast_price, 9.85)
+        self.assertAlmostEqual(decision.ma_trend_price, 10.5)
+        self.assertAlmostEqual(decision.ma_long_price, 10.4)
+        self.assertAlmostEqual(decision.ma_trend_slope, -0.01)
+        self.assertAlmostEqual(decision.recent_swing_low, 9.0)
 
 
 if __name__ == "__main__":

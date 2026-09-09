@@ -159,6 +159,15 @@ PyCharm 一键日常运行可以用 `daily`，它会先同步当前持仓股票�
   --output output\current_stops.csv
 ```
 
+项目已提供共享 PyCharm 运行配置 `TPSL Daily S3 Write DB`。它严格按以下顺序执行：
+同步全部持仓行情；任一持仓同步失败则立即终止；只有全部成功后才运行 S3、
+输出 `output/current_stops.csv` 并写入 MySQL。不要再分别运行 sync 和 recommend。
+
+`output/current_stops.csv` 是给每日操作使用的精简表，只保留日期、股票、收盘价、
+成本、S3动作、动作原因和盘中保命触发价/限价，共 8 列。趋势状态、持仓天数、
+利润底、MA、摆动低点、阶段价格和持仓最高价等解释/研究字段仍完整保存在 MySQL，
+不再挤进每日操作 CSV 和终端。
+
 如果确认要把推荐写入 `tpsl_recommendations`，加 `--write-db`：
 
 ```powershell
@@ -470,6 +479,16 @@ B = 现生产：同一 make_risk_decision，使用配置里的 atr_stop_multipli
 - `confidence`：模型、相似样本数量和相似距离组成的内部评分，不是收益概率；
 - `risk_model_version`：动态风控模型版本；
 - `reason`：预测分布、相似形态和风控约束摘要。
+
+当 `[chart_exit].enabled = true` 时，`recommend` 进入 S3 独占输出模式：
+不加载或计算旧的次日高低点模型、相似形态止盈、盈亏比和置信度，
+终端与 CSV 只输出 `chart_exit_*` 字段。此时数据库中的通用
+`stop_trigger_price`/`stop_limit_price` 也写入 S3 保命单价格；旧表中的其他
+非空模型列仅写兼容占位值，不代表旧策略参与了决策。
+
+S3 输出包括动作与原因、盘中保命触发价和限价、策略仓位系数、趋势状态、
+持仓交易日数、持仓最高收盘价、初始结构止损、进入趋势阶段的进度价、
+分段利润底，以及 MA10/MA20/MA60、MA20 斜率和近期确认低点。
 
 止盈默认使用次日最高收益的 70% 分位，并且不得低于持仓成本上方 0.3%；该成本保护比例可通过 `recommendation.minimum_profit_over_cost_pct` 调整。
 

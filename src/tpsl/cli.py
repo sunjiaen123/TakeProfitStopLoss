@@ -15,6 +15,7 @@ from .exit_machine import run_exit_machine_backtest
 from .holding_backtest import run_holding_backtest
 from .pipeline import (
     export_preview,
+    recommendation_preview_frame,
     recommend_pipeline,
     resolve_recommend_as_of_date,
     train_pipeline,
@@ -320,26 +321,43 @@ def _print_recommendations(frame) -> None:
     if frame.empty:
         print("没有有效持仓，无建议需要生成。")
         return
-    display_columns = [
-        "symbol",
-        "close_price",
-        "take_profit_enabled",
-        "take_profit_price",
-        "stop_trigger_price",
-        "stop_limit_price",
-        "dynamic_stop_gap_pct",
-        "strategy_profile",
-        "chart_exit_action",
-        "chart_exit_reason",
-        "chart_exit_stop_trigger_price",
-        "chart_exit_position_scale",
-        "risk_reward_ratio",
-        "confidence",
-    ]
+    chart_exit_active = (
+        "chart_exit_action" in frame.columns
+        and frame["chart_exit_action"].notna().any()
+    )
+    if chart_exit_active:
+        print(recommendation_preview_frame(frame).to_string(index=False))
+        return
+    else:
+        display_columns = [
+            "symbol",
+            "close_price",
+            "take_profit_enabled",
+            "take_profit_price",
+            "stop_trigger_price",
+            "stop_limit_price",
+            "dynamic_stop_gap_pct",
+            "risk_reward_ratio",
+            "confidence",
+        ]
     display_columns = [
         column for column in display_columns if column in frame.columns
     ]
     print(frame[display_columns].to_string(index=False))
+
+
+def _require_complete_daily_sync(sync_result: dict[str, object]) -> None:
+    """Do not generate or persist a daily decision after a partial sync."""
+    symbol_count = int(sync_result.get("symbols", 0) or 0)
+    failed_count = int(sync_result.get("failed_symbols", 0) or 0)
+    if symbol_count <= 0:
+        raise RuntimeError("每日任务终止：没有找到有效持仓，未生成S3建议")
+    if failed_count > 0:
+        errors = sync_result.get("errors") or {}
+        raise RuntimeError(
+            f"每日任务终止：{failed_count} 只持仓行情同步失败，"
+            f"未计算、未写入S3建议。错误：{errors}"
+        )
 
 
 def main() -> None:
@@ -372,6 +390,7 @@ def main() -> None:
             )
             print("同步结果：")
             print(json.dumps(sync_result, ensure_ascii=False, indent=2, default=str))
+            _require_complete_daily_sync(sync_result)
             as_of_date = resolve_recommend_as_of_date(
                 engine,
                 config,
